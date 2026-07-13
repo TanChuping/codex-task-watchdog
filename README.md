@@ -59,9 +59,21 @@ The default detector thresholds are:
 | Completed tool, but no next response request | 45 seconds | — |
 | Response requested, but no SSE activity | 120 seconds | 180 seconds |
 | Tool started, but no matching completion | 180 seconds | 600 seconds |
-| Explicitly armed operation with no verified progress | configured per job; 180 seconds recommended | same rolling no-progress threshold |
+| Explicitly armed operation with no verified progress | selected by the main conversation for that task class | same rolling no-progress threshold |
 
-A new response request, stream event, terminal event, or matching completion clears stale state. Parallel calls remain isolated by `call_id` and explicit jobs use unique tagged generations.
+A new response request, stream event, terminal event, or matching completion clears stale state. Parallel calls remain isolated by `call_id` and explicit jobs use unique tagged generations. Automatic log-state warnings only notify and record; they do not kill a task.
+
+For explicitly armed work, 180 seconds is no longer a universal limit. The main conversation selects a **rolling no-progress threshold** based on the expected silent interval:
+
+| Task class | Starting threshold |
+|---|---:|
+| Fast interactive/network work | 180 seconds |
+| Ordinary commands | 300 seconds |
+| Heavy builds, tests, downloads, CI, or rendering | 600 seconds |
+| Delegated research or bounded batches | 900 seconds |
+| Explicitly sparse marathon work | 1800 seconds or a justified custom value |
+
+These values are not total runtime caps. Expiry is a mandatory review point: the main conversation or a dedicated monitoring Agent inspects the exact attempt. Advancing scan counters, fresh stream/log/tool-call records, changing files, active process work, or a worker phase transition can justify an evidence-bearing heartbeat and another interval. A static “Thinking” label by itself cannot. A long task can therefore run indefinitely while healthy progress continues. The current image workflow remains a deliberate exception: one image attempt keeps its separate 180-second hard watchdog. See the full [timeout selection policy](skills/codex-watchdog/references/timeout-policy.md).
 
 ## Requirements
 
@@ -118,7 +130,7 @@ The included [`SKILL.md`](skills/codex-watchdog/SKILL.md) teaches Codex when to 
 
 ## Monitor one long operation
 
-Every attempt gets its own opaque tag. Keep the returned tag exactly as printed:
+Every attempt gets its own opaque tag. The main conversation first selects the task-appropriate no-progress threshold, then keeps the returned tag exactly as printed:
 
 ```powershell
 $Arm = python $Watchdog --json arm `
@@ -129,7 +141,7 @@ $Arm = python $Watchdog --json arm `
   --label 'concept-03' | ConvertFrom-Json
 $Tag = $Arm.tag
 
-# Only record a heartbeat after observing real progress.
+# Record a heartbeat after the main/monitoring Agent judges current evidence healthy.
 python $Watchdog heartbeat $Tag --note 'new output file observed'
 
 # Always close the exact attempt on every terminal path.

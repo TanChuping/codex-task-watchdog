@@ -18,6 +18,8 @@ Safety invariants:
 - no automatic retries, prompt sending, quota spending, or process killing;
 - no Codex session, rollout, generated-image, or project-data cleanup;
 - one opaque tag per long-running attempt and retry generation;
+- caller-selected rolling no-progress thresholds by task class, rather than one universal 180-second cap;
+- threshold expiry triggers main-agent or monitoring-agent review; healthy current evidence can heartbeat and continue;
 - recovery manifests contain metadata only;
 - outputs and retention are bounded.
 

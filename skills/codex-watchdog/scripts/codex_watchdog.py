@@ -1362,7 +1362,12 @@ def build_parser() -> argparse.ArgumentParser:
     arm.add_argument("--thread")
     arm.add_argument("--turn", default="auto")
     arm.add_argument("--kind", required=True)
-    arm.add_argument("--timeout-seconds", type=float, default=180.0)
+    arm.add_argument(
+        "--timeout-seconds",
+        type=float,
+        default=300.0,
+        help="Rolling no-progress threshold selected for this task class (default: 300)",
+    )
     arm.add_argument("--label")
     arm.add_argument("--generation", type=int, default=1)
 

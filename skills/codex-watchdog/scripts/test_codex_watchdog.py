@@ -350,6 +350,15 @@ class WatchdogTest(unittest.TestCase):
         jobs = self.runtime.jobs()["jobs"]
         self.assertEqual([job["state"] for job in jobs], ["disarmed", "armed"])
 
+    def test_arm_parser_uses_ordinary_command_fallback_but_allows_override(self):
+        parser = wd.build_parser()
+        default_args = parser.parse_args(["arm", "--kind", "shell"])
+        custom_args = parser.parse_args(
+            ["arm", "--kind", "build", "--timeout-seconds", "600"]
+        )
+        self.assertEqual(default_args.timeout_seconds, 300.0)
+        self.assertEqual(custom_args.timeout_seconds, 600.0)
+
     def test_arm_rejects_manifest_invalid_timeout_and_generation(self):
         invalid_arguments = (
             ["arm", "--kind", "shell", "--timeout-seconds", "0"],
@@ -407,6 +416,14 @@ class WatchdogTest(unittest.TestCase):
         self.assertEqual(len(records), 1)
         self.assertEqual(records[0]["kind"], "armed_job_no_verified_progress")
         self.assertEqual(records[0]["tag"], armed["tag"])
+        reviewed = wd.update_job(
+            self.runtime,
+            armed["tag"],
+            "heartbeat",
+            "scan counter advanced during mandatory review",
+        )
+        self.assertEqual(reviewed["state"], "armed")
+        self.assertEqual(self.runtime.jobs()["jobs"][0]["state"], "armed")
 
     def test_initialization_starts_at_log_tail(self):
         now = int(time.time()) - 100

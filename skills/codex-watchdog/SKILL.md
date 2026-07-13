@@ -1,6 +1,6 @@
 ---
 name: codex-watchdog
-description: Monitor long-running Codex tools and diagnose stalled or oversized tasks. Use for watchdog, 看门狗, stuck tool calls, tool timeouts, 卡死监控, session health, bounded cleanup, safe handoff recovery, enabling or disabling local monitoring, or work expected to run longer than 30 seconds. Never auto-retry side effects or delete Codex data.
+description: Monitor long-running Codex tools and diagnose stalled or oversized tasks. Use for watchdog, 看门狗, stuck tool calls, tool timeouts, 卡死监控, session health, adaptive no-progress thresholds, bounded cleanup, safe handoff recovery, enabling or disabling local monitoring, or work expected to run longer than 30 seconds. Never auto-retry side effects or delete Codex data.
 ---
 
 # Codex Watchdog
@@ -22,11 +22,11 @@ Do not merely acknowledge these requests. `disable` persists across conversation
 
 For each tool or delegated worker expected to exceed 30 seconds:
 
-1. Check `status` once before an immediately launched batch. If enabled, run `arm --kind KIND --turn auto --generation 1 --timeout-seconds 180 --label SHORT-LABEL` for every initial attempt. The script uses `CODEX_THREAD_ID` when available and otherwise keeps an `unknown-thread` diagnostic label; tag UUIDs still isolate jobs. Retain the exact unique tag returned by the script.
+1. Check `status` once before an immediately launched batch. If enabled, classify each attempt and have the main conversation choose a rolling no-progress threshold from [references/timeout-policy.md](references/timeout-policy.md). Run `arm --kind KIND --turn auto --generation 1 --timeout-seconds CHOSEN-SECONDS --label SHORT-LABEL` for every initial attempt. The script uses `CODEX_THREAD_ID` when available and otherwise keeps an `unknown-thread` diagnostic label; tag UUIDs still isolate jobs. Retain the exact unique tag returned by the script.
 2. Keep parallel work isolated: assign one tag to one attempt, and pass that exact tag to every later command.
-3. Observe the real worker or output at least every 30 seconds. Record a heartbeat only with current evidence; a timer tick alone is not proof of progress.
-4. At 180 seconds without a result or verified progress, stop waiting, preserve completed outputs, mark the attempt stalled, and terminate only that worker when safe. Treat 180 seconds as a rolling no-progress threshold, not an absolute wall-clock cap.
-5. Always run `disarm TAG --reason REASON` immediately on completion, failure, cancellation, or timeout. Use a new generation and a new tag for any retry.
+3. Observe the real worker or output at least every 30 seconds. The main conversation or a dedicated monitoring subagent may record a heartbeat after judging the attempt healthy from current evidence such as advancing scan counters, new stream/log/tool-call records, changing output files, active process work, worker phase changes, or other task-specific progress. A timer tick or an unchanged “thinking” label alone is not proof of progress.
+4. Treat expiry of the chosen interval as a mandatory review point, not an automatic stop. Notify or wake the main conversation/monitoring worker and inspect the exact attempt. If current evidence shows normal progress and no abnormal condition, run `heartbeat TAG --note EVIDENCE` and continue waiting; this re-arms a provisionally stalled job. If evidence confirms a real stall, preserve completed outputs and terminate only that worker when safe. A task may run much longer than `timeout_seconds` while it continues producing verified progress. Keep the separate 180-second hard limit for a single image-generation attempt when the active repository or user instructions require it.
+5. Always run `disarm TAG --reason REASON` immediately on completion, failure, cancellation, or a confirmed abnormal stall. Use a new generation and a new tag for any retry.
 
 Never automatically replay a tool that can spend quota, send messages, mutate files, or otherwise cause side effects unless an active user instruction explicitly pre-authorizes that retry. After a reconnect or interruption, inspect `status`, bounded `list`, bounded `incidents`, and actual outputs before deciding whether anything is genuinely missing. Compatibility `--all` output is still capped and must not be used as a routine context dump.
 
@@ -44,3 +44,4 @@ The daemon retains all active/stalled jobs, prunes disarmed jobs after 30 days o
 
 Read [references/protocol.md](references/protocol.md) before arming parallel jobs, handling a stall, or installing the per-user startup entry. Use [references/manifest.schema.json](references/manifest.schema.json) when reading or writing the job manifest.
 Use [references/recovery-manifest.schema.json](references/recovery-manifest.schema.json) when consuming an automatic critical recovery manifest.
+Read [references/timeout-policy.md](references/timeout-policy.md) before selecting or changing a manual job's no-progress threshold.

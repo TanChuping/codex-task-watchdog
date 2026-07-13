@@ -11,7 +11,7 @@ Resolve `<WD_SCRIPT>` to the absolute path of `scripts/codex_watchdog.py` beside
 | `start` | Start the hidden watcher when monitoring is enabled. |
 | `run [--once]` | Run the watcher in the foreground, or perform one polling pass. |
 | `status` | Show configuration, watcher state, and active-job counts. |
-| `arm --kind KIND [--thread ID] [--turn ID\|auto] [--timeout-seconds N] [--label TEXT] [--generation N]` | Register one attempt and return its unique tag. The thread defaults to `CODEX_THREAD_ID`; `--turn auto` infers the latest matching turn or creates a unique logical turn label. Use `--timeout-seconds 180` for the standard hard threshold. |
+| `arm --kind KIND [--thread ID] [--turn ID\|auto] [--timeout-seconds N] [--label TEXT] [--generation N]` | Register one attempt and return its unique tag. The thread defaults to `CODEX_THREAD_ID`; `--turn auto` infers the latest matching turn or creates a unique logical turn label. `--timeout-seconds` is a caller-selected rolling no-progress threshold; choose it using `timeout-policy.md`, not as a universal total-runtime cap. |
 | `heartbeat TAG [--note TEXT]` | Record a live observation for exactly one attempt. |
 | `disarm TAG [--reason TEXT]` | Close exactly one attempt. Always supply a useful terminal reason. |
 | `list [--limit N] [--all]` | List active jobs by default. Output is capped at 500 records even with compatibility `--all`. |
@@ -36,20 +36,17 @@ Treat the entire string as opaque. `thread`, `turn`, and `kind` aid diagnosis; `
 ## Job state machine
 
 ```text
-                    heartbeat (verified observation)
-                   +-------------------------------+
-                   |                               |
-arm --> ARMED ------+----------------------------> ARMED
-  |                                                  |
-                   | 180 s without result or verified progress       | result/failure/cancel
-  v                                                  v
-STALLED ----------------------------------------> DISARMED
-                      disarm --reason stalled
+arm --> ARMED -- chosen interval expires --> STALLED (review due)
+          ^                                      |
+          | heartbeat TAG --note EVIDENCE        | confirmed abnormality
+          +--------------------------------------+--> DISARMED
+
+ARMED or STALLED -- result/failure/cancel --> DISARMED
 ```
 
 - Keep global `enabled`/`disabled` separate from job state. `disable` prevents new monitoring but does not turn a prior tool result into a failure.
-- Treat a 30-second heartbeat as liveness evidence only. The 180-second threshold is rolling time since the last verified progress, not an absolute wall-clock cap. Do not let synthetic timer ticks reset it.
-- On every terminal path, call `disarm`. Record reasons such as `completed`, `failed: <cause>`, `cancelled`, or `stalled: 180s without verified progress`.
+- Treat a 30-second observation cadence as a check opportunity only. The selected threshold is rolling time since the last verified progress, not an absolute wall-clock cap. On expiry, the `stalled` state means mandatory human/agent review, not automatic termination. If current scan, stream, log, tool-call, file, process, worker-phase, or task-specific evidence is healthy, record an evidence-bearing heartbeat and continue. Do not let synthetic timer ticks or an unchanged “thinking” label reset it. See `timeout-policy.md` for task-class defaults and override rules.
+- On every terminal or confirmed-stall path, call `disarm`. Record reasons such as `completed`, `failed: <cause>`, `cancelled`, or `confirmed stalled: <evidence>`.
 - Never revive a disarmed tag. Arm a retry with an incremented generation; do not replay side-effecting work automatically.
 
 ## Parallel isolation

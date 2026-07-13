@@ -23,6 +23,7 @@ $Files = @(
     'references\manifest.schema.json',
     'references\protocol.md',
     'references\recovery-manifest.schema.json',
+    'references\timeout-policy.md',
     'scripts\codex_watchdog.py',
     'scripts\check_thread_health.py',
     'scripts\test_codex_watchdog.py'

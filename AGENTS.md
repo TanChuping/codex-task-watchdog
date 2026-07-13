@@ -1,6 +1,6 @@
 # Repository instructions
 
-- Read `skills/codex-watchdog/SKILL.md` and `skills/codex-watchdog/references/protocol.md` before changing behavior.
+- Read `skills/codex-watchdog/SKILL.md`, `skills/codex-watchdog/references/protocol.md`, and `skills/codex-watchdog/references/timeout-policy.md` before changing behavior.
 - Keep the project standard-library-only unless maintainers explicitly accept a dependency.
 - Use only synthetic log events, paths, IDs, and labels in tests and documentation.
 - Never commit Codex databases, runtime state, incidents, recovery manifests, session files, rollouts, generated images, credentials, proxy settings, or absolute contributor paths.
