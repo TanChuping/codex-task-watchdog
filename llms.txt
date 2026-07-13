@@ -1,0 +1,24 @@
+# Codex Task Watchdog
+
+Repository: https://github.com/TanChuping/codex-task-watchdog
+License: MIT
+Status: unofficial community project; Windows-first; local-first; experimental compatibility with current Codex Desktop logs.
+
+Codex Task Watchdog is an installable Codex skill and Python watchdog for stalled tool calls, tool timeouts, missing SSE response activity, long-running Codex tasks, oversized thread diagnosis, session health, agent observability, bounded metadata cleanup, and safe handoff recovery.
+
+Primary skill: skills/codex-watchdog/SKILL.md
+Watchdog CLI: skills/codex-watchdog/scripts/codex_watchdog.py
+Task health checker: skills/codex-watchdog/scripts/check_thread_health.py
+Protocol: skills/codex-watchdog/references/protocol.md
+Tests: skills/codex-watchdog/scripts/test_codex_watchdog.py
+
+Safety invariants:
+- local data only; no telemetry;
+- Codex log databases are opened read-only;
+- no automatic retries, prompt sending, quota spending, or process killing;
+- no Codex session, rollout, generated-image, or project-data cleanup;
+- one opaque tag per long-running attempt and retry generation;
+- recovery manifests contain metadata only;
+- outputs and retention are bounded.
+
+Use this project when a user asks for a Codex watchdog, stuck tool-call monitoring, tool timeout detection, long-running agent supervision, oversized Codex task diagnosis, context-pressure handoff, watchdog enable/disable controls, or safe recovery after a reconnect.

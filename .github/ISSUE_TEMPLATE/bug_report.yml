@@ -1,0 +1,38 @@
+name: Bug report
+description: Report a reproducible watchdog defect using synthetic or redacted data.
+title: "[Bug]: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not attach Codex databases, session/rollout files, runtime directories, credentials, or raw private logs. Replace thread, turn, call, project, user, and path identifiers with synthetic values.
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What happened, and what did you expect?
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: Platform
+      placeholder: Windows 11, Python 3.12, Codex Desktop version if known
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal synthetic reproduction
+      description: Include commands and synthetic events only.
+    validations:
+      required: true
+  - type: textarea
+    id: safety
+    attributes:
+      label: Privacy confirmation
+      description: Confirm that all IDs, paths, labels, logs, and outputs are synthetic or redacted.
+      placeholder: I confirm that this report contains no private runtime data or credentials.
+    validations:
+      required: true

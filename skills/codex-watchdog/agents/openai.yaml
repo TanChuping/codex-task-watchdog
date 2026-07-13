@@ -1,0 +1,4 @@
+interface:
+  display_name: "Codex Watchdog"
+  short_description: "Detect stalls and recover oversized Codex tasks"
+  default_prompt: "Use $codex-watchdog to check, enable, disable, clean, or diagnose the local watchdog and create a safe handoff for an oversized task."

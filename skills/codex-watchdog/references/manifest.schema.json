@@ -1,0 +1,86 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://local.codex/watchdog/manifest.schema.json",
+  "title": "Codex watchdog job manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "updated_at", "jobs"],
+  "properties": {
+    "schema_version": { "type": "integer", "const": 1 },
+    "updated_at": { "$ref": "#/$defs/timestamp" },
+    "jobs": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/job" }
+    }
+  },
+  "$defs": {
+    "timestamp": { "type": "string", "format": "date-time" },
+    "nullableTimestamp": {
+      "oneOf": [
+        { "$ref": "#/$defs/timestamp" },
+        { "type": "null" }
+      ]
+    },
+    "job": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "tag",
+        "thread_id",
+        "turn_id",
+        "kind",
+        "uuid",
+        "generation",
+        "label",
+        "state",
+        "armed_at",
+        "armed_at_epoch",
+        "last_heartbeat_at",
+        "last_progress_at",
+        "timeout_seconds",
+        "incident_count",
+        "last_incident_at",
+        "note",
+        "disarmed_at",
+        "reason"
+      ],
+      "properties": {
+        "tag": {
+          "type": "string",
+          "pattern": "^\\[CODEX-WATCHDOG\\|thread=[^|\\]]+\\|turn=[^|\\]]+\\|kind=[^|\\]]+\\|uuid=[0-9a-fA-F-]{36}\\|generation=[0-9]+\\]$"
+        },
+        "thread_id": { "type": "string", "minLength": 1 },
+        "turn_id": { "type": "string", "minLength": 1 },
+        "kind": { "type": "string", "minLength": 1 },
+        "uuid": { "type": "string", "format": "uuid" },
+        "generation": { "type": "integer", "minimum": 0 },
+        "label": { "type": ["string", "null"] },
+        "state": { "type": "string", "enum": ["armed", "stalled", "disarmed"] },
+        "armed_at": { "$ref": "#/$defs/timestamp" },
+        "armed_at_epoch": { "type": "number", "minimum": 0 },
+        "last_heartbeat_at": { "$ref": "#/$defs/timestamp" },
+        "last_progress_at": { "type": "number", "minimum": 0 },
+        "timeout_seconds": { "type": "number", "exclusiveMinimum": 0 },
+        "incident_count": { "type": "integer", "minimum": 0 },
+        "last_incident_at": { "type": "number", "minimum": 0 },
+        "note": { "type": ["string", "null"] },
+        "disarmed_at": { "$ref": "#/$defs/nullableTimestamp" },
+        "reason": { "type": ["string", "null"] }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "state": { "const": "disarmed" } },
+            "required": ["state"]
+          },
+          "then": {
+            "properties": {
+              "disarmed_at": { "$ref": "#/$defs/timestamp" },
+              "reason": { "type": "string", "minLength": 1 }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

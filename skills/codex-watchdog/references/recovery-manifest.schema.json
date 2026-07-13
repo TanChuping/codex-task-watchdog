@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://local.codex/watchdog/recovery-manifest.schema.json",
+  "title": "Codex watchdog recovery manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["thread_id", "turn_id", "phase", "active_calls", "event_times", "rollout", "recommendations"],
+  "properties": {
+    "thread_id": { "type": "string", "minLength": 1 },
+    "turn_id": { "type": "string", "minLength": 1 },
+    "phase": { "type": "string", "minLength": 1 },
+    "active_calls": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["call_id", "started_at"],
+        "properties": {
+          "call_id": { "type": "string", "minLength": 1 },
+          "started_at": { "type": ["string", "null"], "format": "date-time" }
+        }
+      }
+    },
+    "event_times": {
+      "type": "object",
+      "additionalProperties": { "type": "string", "format": "date-time" }
+    },
+    "rollout": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "size_bytes"],
+      "properties": {
+        "path": { "type": ["string", "null"] },
+        "size_bytes": { "type": ["integer", "null"], "minimum": 0 }
+      }
+    },
+    "recommendations": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "type": "string", "minLength": 1 }
+    }
+  }
+}
