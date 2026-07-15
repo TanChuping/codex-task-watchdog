@@ -50,6 +50,13 @@ def request_body() -> str:
     return scope() + 'stream_request{x=1}: endpoint="/responses" auth_header_attached=true'
 
 
+def prepare_body() -> str:
+    return scope() + (
+        ' model="test" approval_policy=Never sandbox_policy=DangerFullAccess '
+        'effort=Some(Ultra)'
+    )
+
+
 def stream_body() -> str:
     return scope() + "stream_request{x=1}: unhandled responses event: codex.response.metadata"
 
@@ -133,14 +140,47 @@ class WatchdogTest(unittest.TestCase):
         self.assertEqual(result["incidents"], 0)
         self.assertEqual(self.incidents(), [])
 
-    def test_post_tool_without_request_alerts(self):
+    def test_post_tool_without_observable_transition_requests_review_only(self):
+        with wd.FileLock(self.runtime.lock_path):
+            config = self.runtime.config()
+            config["opaque_model_seconds"] = 10
+            self.runtime.save_config(config)
         now = int(time.time()) - 40
         self.insert(1, now, wd.TARGET_TOOL_START, start_body())
         self.insert(2, now + 1, wd.TARGET_TOOL_DONE, done_body())
         result = wd.run_once(self.runtime)
         self.assertEqual(result["incidents"], 1)
-        self.assertEqual(self.incidents()[0]["kind"], "post_tool_no_request")
-        self.assertEqual(self.incidents()[0]["severity"], "critical")
+        incident = self.incidents()[0]
+        self.assertEqual(incident["kind"], "post_tool_transition_unobserved")
+        self.assertEqual(incident["severity"], "review")
+        self.assertEqual(incident["evidence_class"], "absence_only")
+        self.assertFalse(incident["confirmed_failure"])
+        self.assertFalse(incident["safe_to_interrupt"])
+
+    def test_model_prepare_event_prevents_post_tool_false_positive(self):
+        now = int(time.time())
+        self.insert(1, now - 40, wd.TARGET_TOOL_START, start_body())
+        self.insert(2, now - 39, wd.TARGET_TOOL_DONE, done_body())
+        self.insert(3, now - 1, wd.TARGET_REQUEST, prepare_body())
+        result = wd.run_once(self.runtime)
+        self.assertEqual(result["incidents"], 0)
+        turn = next(iter(self.runtime.state()["turns"].values()))
+        self.assertEqual(turn["phase"], "model_preparing")
+        self.assertIsNotNone(turn["model_preparing_at"])
+
+    def test_opaque_model_preparation_is_review_not_permission_to_stop(self):
+        with wd.FileLock(self.runtime.lock_path):
+            config = self.runtime.config()
+            config["opaque_model_seconds"] = 10
+            self.runtime.save_config(config)
+        now = int(time.time()) - 40
+        self.insert(1, now, wd.TARGET_REQUEST, prepare_body())
+        wd.run_once(self.runtime)
+        incident = self.incidents()[0]
+        self.assertEqual(incident["kind"], "model_preparing_no_request")
+        self.assertEqual(incident["severity"], "review")
+        self.assertEqual(incident["observability"], "opaque_model_preparation")
+        self.assertFalse(incident["safe_to_interrupt"])
 
     def test_request_without_first_event_alerts(self):
         now = int(time.time()) - 35
@@ -195,6 +235,10 @@ class WatchdogTest(unittest.TestCase):
         self.assertEqual(turn["active_calls"], [])
 
     def test_parallel_calls_wait_until_all_are_done(self):
+        with wd.FileLock(self.runtime.lock_path):
+            config = self.runtime.config()
+            config["opaque_model_seconds"] = 10
+            self.runtime.save_config(config)
         now = int(time.time()) - 40
         self.insert(1, now, wd.TARGET_TOOL_START, start_body("call_A"))
         self.insert(2, now, wd.TARGET_TOOL_START, start_body("call_B"))
@@ -206,7 +250,7 @@ class WatchdogTest(unittest.TestCase):
         self.assertEqual(turn["active_calls"], ["call_A"])
         self.insert(4, now + 2, wd.TARGET_TOOL_DONE, done_body("call_A"))
         wd.run_once(self.runtime)
-        self.assertEqual(self.incidents()[0]["kind"], "post_tool_no_request")
+        self.assertEqual(self.incidents()[0]["kind"], "post_tool_transition_unobserved")
 
     def test_tool_timeout_is_per_call_and_critical_writes_recovery_manifest(self):
         with wd.FileLock(self.runtime.lock_path):
@@ -232,7 +276,8 @@ class WatchdogTest(unittest.TestCase):
         self.assertEqual(result["incidents"], 1)
         incident = self.incidents()[0]
         self.assertEqual(incident["kind"], "tool_running_no_completion")
-        self.assertEqual(incident["severity"], "critical")
+        self.assertEqual(incident["severity"], "review")
+        self.assertFalse(incident["safe_to_interrupt"])
         self.assertEqual(incident["call_id"], "call_stale")
         manifest_path = Path(incident["recovery_manifest"])
         self.assertTrue(manifest_path.is_file())
@@ -246,11 +291,16 @@ class WatchdogTest(unittest.TestCase):
                 "active_calls",
                 "event_times",
                 "rollout",
+                "incident",
+                "resume",
                 "recommendations",
             },
         )
         self.assertEqual(manifest["rollout"]["path"], str(rollout.resolve()))
         self.assertEqual(manifest["rollout"]["size_bytes"], 321)
+        self.assertEqual(manifest["resume"]["strategy"], "same_thread_first")
+        self.assertFalse(manifest["resume"]["automatic_wake"])
+        self.assertFalse(manifest["incident"]["safe_to_interrupt"])
         self.assertEqual(
             [call["call_id"] for call in manifest["active_calls"]],
             ["call_recent", "call_stale"],
@@ -415,6 +465,8 @@ class WatchdogTest(unittest.TestCase):
         records = self.incidents()
         self.assertEqual(len(records), 1)
         self.assertEqual(records[0]["kind"], "armed_job_no_verified_progress")
+        self.assertEqual(records[0]["severity"], "review")
+        self.assertFalse(records[0]["safe_to_interrupt"])
         self.assertEqual(records[0]["tag"], armed["tag"])
         reviewed = wd.update_job(
             self.runtime,
@@ -424,6 +476,55 @@ class WatchdogTest(unittest.TestCase):
         )
         self.assertEqual(reviewed["state"], "armed")
         self.assertEqual(self.runtime.jobs()["jobs"][0]["state"], "armed")
+
+    def test_recover_plan_keeps_opaque_live_task_running(self):
+        now = time.time()
+        turn = wd.fresh_turn(PROCESS, THREAD, TURN, now)
+        turn["phase"] = "model_preparing"
+        turn["model_preparing_at"] = now
+        with wd.FileLock(self.runtime.lock_path):
+            state = self.runtime.state()
+            state["turns"] = {"live": turn}
+            self.runtime.save_state(state)
+        plan = wd.build_recovery_plan(self.runtime, THREAD, TURN)
+        self.assertEqual(plan["decision"], "observe_no_interruption")
+        self.assertEqual(plan["live_state"], "working_or_opaque")
+        self.assertFalse(plan["safe_to_interrupt"])
+        self.assertFalse(plan["automatic_wake"])
+        self.assertTrue(plan["same_thread_first"])
+
+    def test_recover_plan_marks_aborted_task_as_same_thread_candidate(self):
+        now = time.time()
+        turn = wd.fresh_turn(PROCESS, THREAD, TURN, now)
+        turn["phase"] = "terminal"
+        turn["terminal"] = "aborted"
+        with wd.FileLock(self.runtime.lock_path):
+            state = self.runtime.state()
+            state["turns"] = {"aborted": turn}
+            self.runtime.save_state(state)
+        plan = wd.build_recovery_plan(self.runtime, THREAD, TURN)
+        self.assertEqual(plan["decision"], "same_thread_wake_candidate")
+        self.assertFalse(plan["automatic_wake"])
+        self.assertFalse(plan["safe_to_interrupt"])
+
+    def test_recover_plan_downgrades_legacy_critical_absence_record(self):
+        self.runtime.append_incident(
+            {
+                "kind": "post_tool_no_request",
+                "severity": "critical",
+                "thread_id": THREAD,
+                "turn_id": TURN,
+                "automatic_action": "none",
+            }
+        )
+        plan = wd.build_recovery_plan(self.runtime, THREAD, TURN)
+        incident = plan["latest_incident"]
+        self.assertTrue(incident["legacy_record"])
+        self.assertEqual(incident["original_severity"], "critical")
+        self.assertEqual(incident["severity"], "review")
+        self.assertEqual(incident["evidence_class"], "absence_only")
+        self.assertFalse(incident["confirmed_failure"])
+        self.assertFalse(incident["safe_to_interrupt"])
 
     def test_initialization_starts_at_log_tail(self):
         now = int(time.time()) - 100

@@ -28,6 +28,7 @@ import uuid
 
 
 SCHEMA_VERSION = 1
+DETECTOR_VERSION = 2
 DEFAULT_TASK_NAME = "Codex Watchdog"
 MAX_LOG_BATCH_ROWS = 2000
 DEFAULT_LIST_LIMIT = 100
@@ -59,6 +60,9 @@ TOOL_DONE_RE = re.compile(
     r'\bexecution_started=(?:true|false)\b'
 )
 REQUEST_RE = re.compile(r'(?:^|}:)\s*endpoint="/responses"(?:\s|$)')
+MODEL_PREPARE_RE = re.compile(
+    r':\s*model="[^"]+"\s+approval_policy=[^\s]+\s+sandbox_policy='
+)
 FIRST_STREAM_RE = re.compile(
     r':\s*unhandled responses event:\s*'
     r'(?:codex\.response\.metadata|response\.in_progress)\s*$'
@@ -118,6 +122,8 @@ def default_config(home: Path) -> dict:
         "post_tool_seconds": 45.0,
         "response_seconds": 120.0,
         "critical_seconds": 180.0,
+        "opaque_model_seconds": 600.0,
+        "stream_silence_seconds": 900.0,
         "tool_warning_seconds": 180.0,
         "tool_critical_seconds": 600.0,
         "log_batch_rows": MAX_LOG_BATCH_ROWS,
@@ -232,6 +238,7 @@ class Runtime:
                     self.state_path,
                     {
                         "schema_version": SCHEMA_VERSION,
+                        "detector_version": DETECTOR_VERSION,
                         "initialized": False,
                         "last_log_id": 0,
                         "database_identity": None,
@@ -265,6 +272,7 @@ class Runtime:
             self.state_path,
             {
                 "schema_version": SCHEMA_VERSION,
+                "detector_version": DETECTOR_VERSION,
                 "initialized": False,
                 "last_log_id": 0,
                 "database_identity": None,
@@ -346,6 +354,7 @@ def fresh_turn(process_uuid: str | None, thread_id: str, turn_id: str, stamp: fl
         "tool_incidents": {},
         "observed_tool_start": False,
         "post_tool_at": None,
+        "model_preparing_at": None,
         "request_at": None,
         "request_attempt": 0,
         "first_stream_at": None,
@@ -416,6 +425,7 @@ def process_event(state: dict, row: tuple) -> None:
         turn["observed_tool_start"] = True
         turn["phase"] = "tool_running"
         turn["post_tool_at"] = None
+        turn["model_preparing_at"] = None
         turn["request_at"] = None
         clear_incident(turn)
         return
@@ -431,28 +441,41 @@ def process_event(state: dict, row: tuple) -> None:
         if was_active and turn.get("observed_tool_start") and not active:
             turn["phase"] = "post_tool_pending"
             turn["post_tool_at"] = stamp
+            turn["model_preparing_at"] = None
             turn["request_at"] = None
             turn["first_stream_at"] = None
             clear_incident(turn)
         return
 
-    if target == TARGET_REQUEST and REQUEST_RE.search(body):
-        clear_active_calls(turn)
-        turn["phase"] = "request_pending"
-        turn["request_at"] = stamp
-        turn["request_attempt"] = int(turn.get("request_attempt", 0)) + 1
-        turn["post_tool_at"] = None
-        turn["first_stream_at"] = None
-        clear_incident(turn)
-        return
+    if target == TARGET_REQUEST:
+        if REQUEST_RE.search(body):
+            clear_active_calls(turn)
+            turn["phase"] = "request_pending"
+            turn["request_at"] = stamp
+            turn["request_attempt"] = int(turn.get("request_attempt", 0)) + 1
+            turn["post_tool_at"] = None
+            turn["model_preparing_at"] = None
+            turn["first_stream_at"] = None
+            clear_incident(turn)
+            return
+        if MODEL_PREPARE_RE.search(body):
+            clear_active_calls(turn)
+            turn["phase"] = "model_preparing"
+            turn["model_preparing_at"] = stamp
+            turn["post_tool_at"] = None
+            turn["request_at"] = None
+            turn["first_stream_at"] = None
+            clear_incident(turn)
+            return
 
     if target == TARGET_STREAM and ANY_STREAM_RE.search(body):
         clear_active_calls(turn)
         turn["last_stream_at"] = stamp
-        if FIRST_STREAM_RE.search(body):
+        if FIRST_STREAM_RE.search(body) or turn.get("phase") != "streaming":
             turn["phase"] = "streaming"
-            turn["first_stream_at"] = stamp
+            turn["first_stream_at"] = turn.get("first_stream_at") or stamp
             turn["request_at"] = None
+            turn["model_preparing_at"] = None
             clear_incident(turn)
         return
 
@@ -461,6 +484,7 @@ def process_event(state: dict, row: tuple) -> None:
         turn["terminal"] = "completed"
         clear_active_calls(turn)
         turn["post_tool_at"] = None
+        turn["model_preparing_at"] = None
         turn["request_at"] = None
         clear_incident(turn)
         return
@@ -470,6 +494,7 @@ def process_event(state: dict, row: tuple) -> None:
         turn["terminal"] = "aborted"
         clear_active_calls(turn)
         turn["post_tool_at"] = None
+        turn["model_preparing_at"] = None
         turn["request_at"] = None
         clear_incident(turn)
 
@@ -484,6 +509,11 @@ def make_incident(
     tag: str | None = None,
     call_id: str | None = None,
     sequence: int = 1,
+    evidence_class: str = "absence_only",
+    observability: str = "opaque",
+    confirmed_failure: bool = False,
+    safe_to_interrupt: bool = False,
+    recommended_action: str = "inspect_live_task",
 ) -> dict:
     incident = {
         "schema_version": SCHEMA_VERSION,
@@ -496,6 +526,11 @@ def make_incident(
         "tag": tag,
         "sequence": sequence,
         "automatic_action": "none",
+        "evidence_class": evidence_class,
+        "observability": observability,
+        "confirmed_failure": confirmed_failure,
+        "safe_to_interrupt": safe_to_interrupt,
+        "recommended_action": recommended_action,
     }
     if call_id is not None:
         incident["call_id"] = call_id
@@ -565,6 +600,7 @@ def write_recovery_manifest(
     for key in (
         "last_event_at",
         "post_tool_at",
+        "model_preparing_at",
         "request_at",
         "first_stream_at",
         "last_stream_at",
@@ -583,7 +619,26 @@ def write_recovery_manifest(
         "active_calls": active_calls,
         "event_times": event_times,
         "rollout": find_rollout_metadata(runtime.home, thread_id),
+        "incident": {
+            "kind": incident.get("kind"),
+            "severity": incident.get("severity"),
+            "evidence_class": incident.get("evidence_class", "absence_only"),
+            "confirmed_failure": bool(incident.get("confirmed_failure", False)),
+            "safe_to_interrupt": bool(incident.get("safe_to_interrupt", False)),
+            "recommended_action": incident.get(
+                "recommended_action", "inspect_live_task"
+            ),
+        },
+        "resume": {
+            "strategy": "same_thread_first",
+            "automatic_wake": False,
+            "wake_requires_live_state_check": True,
+            "fallback": "small_disk_handoff_then_clean_task",
+        },
         "recommendations": [
+            "Inspect the live task state and incomplete model output, not only completed command records.",
+            "Treat absence-only evidence as review due; it never proves that the agent stopped editing.",
+            "If the task is confirmed stopped and unfinished, wake the same task once before creating a handoff.",
             "Inspect actual tool outputs before retrying; a missing UI event is not proof of failure.",
             "Do not automatically replay side-effecting or quota-spending tools.",
             "If the rollout is very large, write a concise handoff and continue in a fresh task.",
@@ -604,6 +659,8 @@ def check_turn_incidents(runtime: Runtime, state: dict, config: dict, now: float
     post_limit = float(config["post_tool_seconds"])
     response_limit = float(config["response_seconds"])
     critical_limit = float(config["critical_seconds"])
+    opaque_limit = float(config.get("opaque_model_seconds", 600.0))
+    stream_limit = float(config.get("stream_silence_seconds", 900.0))
     tool_warning_limit = float(config.get("tool_warning_seconds", 180.0))
     tool_critical_limit = float(config.get("tool_critical_seconds", 600.0))
     reminder = float(config["reminder_seconds"])
@@ -628,7 +685,7 @@ def check_turn_incidents(runtime: Runtime, state: dict, config: dict, now: float
             age = now - anchor
             if age < tool_warning_limit:
                 continue
-            severity = "critical" if age >= tool_critical_limit else "warning"
+            severity = "review" if age >= tool_critical_limit else "warning"
             previous = tool_previous.get(call_id)
             if not incident_due(previous, severity, now, reminder):
                 continue
@@ -641,9 +698,11 @@ def check_turn_incidents(runtime: Runtime, state: dict, config: dict, now: float
                 turn_id=turn["turn_id"],
                 call_id=call_id,
                 sequence=sequence,
+                observability="tool_call_without_completion_event",
+                recommended_action="inspect_tool_and_live_task",
             )
             recovery_manifest = previous.get("recovery_manifest") if previous else None
-            if severity == "critical":
+            if severity == "review":
                 recovery_manifest = recovery_manifest or turn_recovery_manifest
                 if not recovery_manifest or not Path(recovery_manifest).is_file():
                     recovery_manifest = str(
@@ -663,18 +722,34 @@ def check_turn_incidents(runtime: Runtime, state: dict, config: dict, now: float
         phase = turn.get("phase")
         if phase == "post_tool_pending" and turn.get("post_tool_at") is not None:
             anchor = float(turn["post_tool_at"])
-            limit = post_limit
-            kind = "post_tool_no_request"
+            limit = max(post_limit, opaque_limit)
+            kind = "post_tool_transition_unobserved"
+            observability = "post_tool_model_work_unobserved"
+            recommended_action = "inspect_live_task_without_interrupting"
+        elif phase == "model_preparing" and turn.get("model_preparing_at") is not None:
+            anchor = float(turn["model_preparing_at"])
+            limit = opaque_limit
+            kind = "model_preparing_no_request"
+            observability = "opaque_model_preparation"
+            recommended_action = "inspect_live_task_without_interrupting"
         elif phase == "request_pending" and turn.get("request_at") is not None:
             anchor = float(turn["request_at"])
             limit = response_limit
             kind = "request_no_first_event"
+            observability = "network_request_waiting_for_first_event"
+            recommended_action = "inspect_transport_and_live_task"
+        elif phase == "streaming" and turn.get("last_stream_at") is not None:
+            anchor = float(turn["last_stream_at"])
+            limit = stream_limit
+            kind = "stream_no_recent_event"
+            observability = "opaque_model_stream"
+            recommended_action = "inspect_live_stream_without_interrupting"
         else:
             continue
         age = now - anchor
         if age < limit:
             continue
-        severity = "critical" if age >= critical_limit else "warning"
+        severity = "review" if age >= max(critical_limit, limit) else "warning"
         previous = turn.get("incident")
         if not incident_due(previous, severity, now, reminder):
             continue
@@ -686,9 +761,11 @@ def check_turn_incidents(runtime: Runtime, state: dict, config: dict, now: float
             thread_id=turn["thread_id"],
             turn_id=turn["turn_id"],
             sequence=sequence,
+            observability=observability,
+            recommended_action=recommended_action,
         )
         recovery_manifest = previous.get("recovery_manifest") if previous else None
-        if severity == "critical":
+        if severity == "review":
             recovery_manifest = recovery_manifest or turn.get("recovery_manifest")
             if not recovery_manifest or not Path(recovery_manifest).is_file():
                 recovery_manifest = str(write_recovery_manifest(runtime, incident, turn=turn))
@@ -725,12 +802,14 @@ def check_manual_jobs(runtime: Runtime, jobs_doc: dict, config: dict, now: float
         job["last_incident_at"] = now
         incident = make_incident(
             "armed_job_no_verified_progress",
-            "critical",
+            "review",
             age,
             thread_id=job["thread_id"],
             turn_id=job["turn_id"],
             tag=job["tag"],
             sequence=job["incident_count"],
+            observability="manual_heartbeat_gap",
+            recommended_action="inspect_live_task_then_heartbeat_or_recover",
         )
         if job["incident_count"] == 1:
             incident["recovery_manifest"] = str(
@@ -943,8 +1022,8 @@ def notify_incidents(config: dict, incidents: list[dict]) -> None:
         count = len(records)
         subject = f"{count} calls" if count > 1 else "1 event"
         notify_windows(
-            "Codex watchdog",
-            f"{severity} {kind}: {subject}, thread {thread}, turn {turn}, silent {age:.1f}s. No action was taken.",
+            "Codex watchdog review",
+            f"{severity} {kind}: {subject}, thread {thread}, turn {turn}, gap {age:.1f}s. Agent may still be working; do not interrupt from this alert alone.",
         )
 
 
@@ -958,6 +1037,10 @@ def run_once(runtime: Runtime) -> dict:
         state = runtime.state()
         jobs_doc = runtime.jobs()
         state_before = json.dumps(state, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        if int(state.get("detector_version", 0)) != DETECTOR_VERSION:
+            state["turns"] = {}
+            state["detector_version"] = DETECTOR_VERSION
+            state["detector_migrated_at"] = iso_time(now)
         jobs_before = json.dumps(jobs_doc, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         poll_result = poll_logs(runtime, state, config)
         notifications.extend(check_turn_incidents(runtime, state, config, now))
@@ -1227,6 +1310,92 @@ def read_incidents(runtime: Runtime, limit: int, include_all: bool) -> list[dict
     return list(records)
 
 
+def incident_for_recovery_review(record: dict | None) -> dict | None:
+    if record is None:
+        return None
+    reviewed = dict(record)
+    if "evidence_class" not in reviewed:
+        reviewed["legacy_record"] = True
+        reviewed["original_severity"] = reviewed.get("severity")
+        reviewed["severity"] = "review"
+        reviewed["evidence_class"] = "absence_only"
+        reviewed["confirmed_failure"] = False
+        reviewed["safe_to_interrupt"] = False
+        reviewed["recommended_action"] = "inspect_live_task_without_interrupting"
+    return reviewed
+
+
+def build_recovery_plan(runtime: Runtime, thread_id: str, turn_id: str | None) -> dict:
+    """Build a bounded, read-only recovery decision; never wake or stop a task."""
+    state = runtime.state()
+    candidates = [
+        turn
+        for turn in state.get("turns", {}).values()
+        if str(turn.get("thread_id")) == thread_id
+        and (turn_id is None or str(turn.get("turn_id")) == turn_id)
+    ]
+    turn = max(candidates, key=lambda item: float(item.get("last_event_at", 0)), default=None)
+    selected_turn_id = turn_id or (str(turn.get("turn_id")) if turn else None)
+    incidents = [
+        record
+        for record in read_incidents(runtime, MAX_OUTPUT_RECORDS, True)
+        if str(record.get("thread_id")) == thread_id
+        and (selected_turn_id is None or str(record.get("turn_id")) == selected_turn_id)
+    ]
+    latest_incident = incident_for_recovery_review(incidents[-1] if incidents else None)
+    jobs = [
+        job
+        for job in runtime.jobs().get("jobs", [])
+        if str(job.get("thread_id")) == thread_id
+        and (selected_turn_id is None or str(job.get("turn_id")) == selected_turn_id)
+        and job.get("state") != "disarmed"
+    ]
+
+    phase = str(turn.get("phase")) if turn else "unobserved"
+    terminal = turn.get("terminal") if turn else None
+    active_calls = list(turn.get("active_calls", [])) if turn else []
+    if terminal == "completed":
+        decision = "completed_no_recovery"
+        live_state = "terminal_completed"
+    elif terminal == "aborted":
+        decision = "same_thread_wake_candidate"
+        live_state = "terminal_aborted"
+    elif active_calls or phase in {
+        "tool_running",
+        "model_preparing",
+        "request_pending",
+        "streaming",
+    }:
+        decision = "observe_no_interruption"
+        live_state = "working_or_opaque"
+    else:
+        decision = "inspect_live_task_before_wake"
+        live_state = "unconfirmed"
+
+    return {
+        "thread_id": thread_id,
+        "turn_id": selected_turn_id,
+        "phase": phase,
+        "terminal": terminal,
+        "active_calls": active_calls,
+        "active_manual_tags": [job.get("tag") for job in jobs],
+        "latest_incident": latest_incident,
+        "decision": decision,
+        "live_state": live_state,
+        "safe_to_interrupt": False,
+        "automatic_wake": False,
+        "same_thread_first": True,
+        "wake_gate": "live task is terminal/idle, unfinished, and has no advancing output",
+        "next_steps": [
+            "Inspect the target task's live state, including incomplete model output; completed command logs alone are insufficient.",
+            "If it is still working or output is advancing, leave it untouched and heartbeat the exact watchdog tag.",
+            "If it is confirmed stopped and unfinished, send one concise continuation to the same task; preserve its context and disk state.",
+            "After reconnect, verify real outputs before retrying any missing side effect.",
+            "Use a small disk handoff and a clean task only if same-task recovery is impossible or thread health is critical.",
+        ],
+    }
+
+
 def bounded_jobs(jobs: list[dict], include_all: bool, limit: int) -> tuple[list[dict], bool]:
     selected = jobs if include_all else [job for job in jobs if job.get("state") != "disarmed"]
     requested = MAX_OUTPUT_RECORDS if include_all else min(MAX_OUTPUT_RECORDS, max(1, limit))
@@ -1347,6 +1516,8 @@ def build_parser() -> argparse.ArgumentParser:
     enable.add_argument("--post-tool-seconds", type=float)
     enable.add_argument("--response-seconds", type=float)
     enable.add_argument("--critical-seconds", type=float)
+    enable.add_argument("--opaque-model-seconds", type=float)
+    enable.add_argument("--stream-silence-seconds", type=float)
     enable.add_argument("--tool-warning-seconds", type=float)
     enable.add_argument("--tool-critical-seconds", type=float)
     enable.add_argument("--log-batch-rows", type=int)
@@ -1383,6 +1554,12 @@ def build_parser() -> argparse.ArgumentParser:
     incidents = subparsers.add_parser("incidents", help="List recorded incidents")
     incidents.add_argument("--limit", type=int, default=DEFAULT_INCIDENT_LIMIT)
     incidents.add_argument("--all", action="store_true")
+    recovery = subparsers.add_parser(
+        "recover-plan",
+        help="Build a bounded same-task-first recovery plan without waking or stopping anything",
+    )
+    recovery.add_argument("--thread", required=True)
+    recovery.add_argument("--turn")
     cleanup = subparsers.add_parser(
         "cleanup", help="Prune bounded watchdog metadata only; never Codex task data"
     )
@@ -1416,6 +1593,8 @@ def main(argv: list[str] | None = None) -> int:
                 (args.post_tool_seconds, "post_tool_seconds"),
                 (args.response_seconds, "response_seconds"),
                 (args.critical_seconds, "critical_seconds"),
+                (args.opaque_model_seconds, "opaque_model_seconds"),
+                (args.stream_silence_seconds, "stream_silence_seconds"),
                 (args.tool_warning_seconds, "tool_warning_seconds"),
                 (args.tool_critical_seconds, "tool_critical_seconds"),
             ):
@@ -1474,6 +1653,8 @@ def main(argv: list[str] | None = None) -> int:
                 "post_tool_seconds": config.get("post_tool_seconds"),
                 "response_seconds": config.get("response_seconds"),
                 "critical_seconds": config.get("critical_seconds"),
+                "opaque_model_seconds": config.get("opaque_model_seconds"),
+                "stream_silence_seconds": config.get("stream_silence_seconds"),
                 "tool_warning_seconds": config.get("tool_warning_seconds"),
                 "tool_critical_seconds": config.get("tool_critical_seconds"),
                 "log_batch_rows": min(
@@ -1483,6 +1664,7 @@ def main(argv: list[str] | None = None) -> int:
                 "notify": bool(config.get("notify")),
                 "startup_entry": startup_entry_installed(config.get("task_name", DEFAULT_TASK_NAME)),
                 "runtime_dir": str(runtime.root),
+                "detector_version": DETECTOR_VERSION,
             },
             args.json,
         )
@@ -1534,6 +1716,12 @@ def main(argv: list[str] | None = None) -> int:
         with FileLock(runtime.lock_path):
             records = read_incidents(runtime, args.limit, args.all)
         emit(records, args.json)
+        return 0
+
+    if args.command == "recover-plan":
+        with FileLock(runtime.lock_path):
+            plan = build_recovery_plan(runtime, args.thread, args.turn)
+        emit(plan, args.json)
         return 0
 
     if args.command == "cleanup":

@@ -25,23 +25,37 @@ For each tool or delegated worker expected to exceed 30 seconds:
 1. Check `status` once before an immediately launched batch. If enabled, classify each attempt and have the main conversation choose a rolling no-progress threshold from [references/timeout-policy.md](references/timeout-policy.md). Run `arm --kind KIND --turn auto --generation 1 --timeout-seconds CHOSEN-SECONDS --label SHORT-LABEL` for every initial attempt. The script uses `CODEX_THREAD_ID` when available and otherwise keeps an `unknown-thread` diagnostic label; tag UUIDs still isolate jobs. Retain the exact unique tag returned by the script.
 2. Keep parallel work isolated: assign one tag to one attempt, and pass that exact tag to every later command.
 3. Observe the real worker or output at least every 30 seconds. The main conversation or a dedicated monitoring subagent may record a heartbeat after judging the attempt healthy from current evidence such as advancing scan counters, new stream/log/tool-call records, changing output files, active process work, worker phase changes, or other task-specific progress. A timer tick or an unchanged “thinking” label alone is not proof of progress.
-4. Treat expiry of the chosen interval as a mandatory review point, not an automatic stop. Notify or wake the main conversation/monitoring worker and inspect the exact attempt. If current evidence shows normal progress and no abnormal condition, run `heartbeat TAG --note EVIDENCE` and continue waiting; this re-arms a provisionally stalled job. If evidence confirms a real stall, preserve completed outputs and terminate only that worker when safe. A task may run much longer than `timeout_seconds` while it continues producing verified progress. Keep the separate 180-second hard limit for a single image-generation attempt when the active repository or user instructions require it.
+4. Treat expiry of the chosen interval as a mandatory review point, not an automatic stop. Inspect the exact attempt without preempting the main task. If current evidence shows normal progress, run `heartbeat TAG --note EVIDENCE` and continue waiting. Absence-only evidence—including no completed command, unchanged files, no child process, `post_tool_transition_unobserved`, `model_preparing_no_request`, or a quiet model stream—never authorizes interruption. Stop only on explicit user instruction or positive terminal/failure evidence. A task may run much longer than `timeout_seconds` while it continues producing verified progress. Keep the separate 180-second hard limit for a single image-generation attempt when the active repository or user instructions require it.
 5. Always run `disarm TAG --reason REASON` immediately on completion, failure, cancellation, or a confirmed abnormal stall. Use a new generation and a new tag for any retry.
 
 Never automatically replay a tool that can spend quota, send messages, mutate files, or otherwise cause side effects unless an active user instruction explicitly pre-authorizes that retry. After a reconnect or interruption, inspect `status`, bounded `list`, bounded `incidents`, and actual outputs before deciding whether anything is genuinely missing. Compatibility `--all` output is still capped and must not be used as a routine context dump.
 
 The external timer cannot penetrate an app-server, client, or network stall and cannot force the model to resume. It can persist evidence and notify the user; it is not proof that the Agent is alive.
 
+## Review and recover a stopped task
+
+Run `python <WD_SCRIPT> recover-plan --thread THREAD [--turn TURN]` after an alert. This command is bounded and read-only: it does not send a prompt, replay a tool, stop a worker, or create a task.
+
+Then recover in this order:
+
+1. Inspect the target task through the Codex task/thread interface, including incomplete model output and current activity. Do not judge only from completed tool-call logs or file timestamps; an agent may be actively composing code before either changes.
+2. If the task is active, streaming, preparing a model request, editing, or otherwise advancing, leave it untouched. Heartbeat only the exact tag when there is concrete progress evidence.
+3. If the task is confirmed terminal or idle, remains unfinished, and has no advancing output, send one concise continuation to that same task. Tell it to inspect its existing disk state and continue the exact unfinished step. Do not duplicate the work in the monitoring task and do not start a competing worker.
+4. After a reconnect, verify actual outputs before any retry. A missing UI notification is not proof that a side effect failed.
+5. Use a small disk handoff and ask for a clean task only when same-task recovery is impossible or thread health is `critical`. Never fork or clone a critical history.
+
+Treat `severity: review`, `evidence_class: absence_only`, or `safe_to_interrupt: false` literally. These are review notices, not stall verdicts. The watchdog must remain lower-cost than the work it monitors; avoid repeated broad log scans or diagnostic prompts that preempt normal work.
+
 ## Recover oversized tasks
 
 Run `python <SKILL_DIR>/scripts/check_thread_health.py` before substantial work after “continue” or a batch request. Resolve `<SKILL_DIR>` from this skill's own location; never hard-code a user profile path. Use `--thread ID` when diagnosing another task. On `critical`, do not continue or fork that task. Preserve repository and output files, write a small project handoff plus manifest, and start clean with only those paths after the user requests a new task.
 
-Automatic critical incidents write metadata-only recovery manifests under `$CODEX_HOME/watchdog/recovery_manifests` (or `~/.codex/watchdog/recovery_manifests` when `CODEX_HOME` is unset). They may identify a rollout path and byte size but never read, rewrite, compact, or delete rollout contents. A manifest is diagnostic evidence, not authorization to retry.
+Automatic review incidents write metadata-only recovery manifests under `$CODEX_HOME/watchdog/recovery_manifests` (or `~/.codex/watchdog/recovery_manifests` when `CODEX_HOME` is unset). They may identify a rollout path and byte size but never read, rewrite, compact, or delete rollout contents. A manifest is diagnostic evidence, not authorization to interrupt or retry.
 
 ## Keep watchdog metadata bounded
 
 The daemon retains all active/stalled jobs, prunes disarmed jobs after 30 days or beyond the newest 500, and rotates `incidents.jsonl` at 5 MiB with three backups. Run `cleanup --dry-run` to inspect the exact plan; use `cleanup --apply` only when cleanup is requested. Both operations are restricted to the watchdog-owned runtime directory and must report `codex_data_touched: false`.
 
 Read [references/protocol.md](references/protocol.md) before arming parallel jobs, handling a stall, or installing the per-user startup entry. Use [references/manifest.schema.json](references/manifest.schema.json) when reading or writing the job manifest.
-Use [references/recovery-manifest.schema.json](references/recovery-manifest.schema.json) when consuming an automatic critical recovery manifest.
+Use [references/recovery-manifest.schema.json](references/recovery-manifest.schema.json) when consuming an automatic review recovery manifest.
 Read [references/timeout-policy.md](references/timeout-policy.md) before selecting or changing a manual job's no-progress threshold.

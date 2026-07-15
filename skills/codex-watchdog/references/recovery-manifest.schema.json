@@ -4,7 +4,7 @@
   "title": "Codex watchdog recovery manifest",
   "type": "object",
   "additionalProperties": false,
-  "required": ["thread_id", "turn_id", "phase", "active_calls", "event_times", "rollout", "recommendations"],
+  "required": ["thread_id", "turn_id", "phase", "active_calls", "event_times", "rollout", "incident", "resume", "recommendations"],
   "properties": {
     "thread_id": { "type": "string", "minLength": 1 },
     "turn_id": { "type": "string", "minLength": 1 },
@@ -32,6 +32,30 @@
       "properties": {
         "path": { "type": ["string", "null"] },
         "size_bytes": { "type": ["integer", "null"], "minimum": 0 }
+      }
+    },
+    "incident": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "severity", "evidence_class", "confirmed_failure", "safe_to_interrupt", "recommended_action"],
+      "properties": {
+        "kind": { "type": ["string", "null"] },
+        "severity": { "type": ["string", "null"] },
+        "evidence_class": { "type": "string", "minLength": 1 },
+        "confirmed_failure": { "type": "boolean" },
+        "safe_to_interrupt": { "type": "boolean" },
+        "recommended_action": { "type": "string", "minLength": 1 }
+      }
+    },
+    "resume": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["strategy", "automatic_wake", "wake_requires_live_state_check", "fallback"],
+      "properties": {
+        "strategy": { "type": "string", "const": "same_thread_first" },
+        "automatic_wake": { "type": "boolean", "const": false },
+        "wake_requires_live_state_check": { "type": "boolean", "const": true },
+        "fallback": { "type": "string", "minLength": 1 }
       }
     },
     "recommendations": {
