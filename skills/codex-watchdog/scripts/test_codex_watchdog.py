@@ -526,6 +526,21 @@ class WatchdogTest(unittest.TestCase):
         self.assertFalse(incident["confirmed_failure"])
         self.assertFalse(incident["safe_to_interrupt"])
 
+    def test_skill_requires_real_visible_task_creation_receipt(self):
+        skill_root = SCRIPT.parent.parent
+        skill = (skill_root / "SKILL.md").read_text(encoding="utf-8")
+        protocol = (skill_root / "references" / "protocol.md").read_text(encoding="utf-8")
+        for required in (
+            "create_thread",
+            "list_projects",
+            "spawn_agent",
+            "::created-thread{threadId=",
+            "codex://threads/new",
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, skill)
+                self.assertIn(required, protocol)
+
     def test_initialization_starts_at_log_tail(self):
         now = int(time.time()) - 100
         self.insert(1, now, wd.TARGET_REQUEST, request_body())

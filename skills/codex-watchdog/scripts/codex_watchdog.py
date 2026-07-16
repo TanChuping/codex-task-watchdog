@@ -641,7 +641,7 @@ def write_recovery_manifest(
             "If the task is confirmed stopped and unfinished, wake the same task once before creating a handoff.",
             "Inspect actual tool outputs before retrying; a missing UI event is not proof of failure.",
             "Do not automatically replay side-effecting or quota-spending tools.",
-            "If the rollout is very large, write a concise handoff and continue in a fresh task.",
+            "If the rollout is very large, write a concise handoff; after an explicit user request, create a visible sidebar task with create_thread rather than a subagent.",
         ],
     }
     runtime.recovery_dir.mkdir(parents=True, exist_ok=True)
@@ -1391,7 +1391,7 @@ def build_recovery_plan(runtime: Runtime, thread_id: str, turn_id: str | None) -
             "If it is still working or output is advancing, leave it untouched and heartbeat the exact watchdog tag.",
             "If it is confirmed stopped and unfinished, send one concise continuation to the same task; preserve its context and disk state.",
             "After reconnect, verify real outputs before retrying any missing side effect.",
-            "Use a small disk handoff and a clean task only if same-task recovery is impossible or thread health is critical.",
+            "If same-task recovery is impossible or health is critical, write a small handoff; when the user explicitly asks for a visible task, use create_thread rather than a subagent.",
         ],
     }
 

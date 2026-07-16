@@ -4,7 +4,7 @@ Repository: https://github.com/TanChuping/codex-task-watchdog
 License: MIT
 Status: unofficial community project; Windows-first; local-first; experimental compatibility with current Codex Desktop logs.
 
-Codex Task Watchdog is an installable Codex skill and Python watchdog for stalled tool calls, tool timeouts, missing SSE response activity, long-running Codex tasks, oversized thread diagnosis, session health, agent observability, bounded metadata cleanup, and safe handoff recovery.
+Codex Task Watchdog is an installable Codex skill and Python watchdog for stalled tool calls, tool timeouts, missing SSE response activity, long-running Codex tasks, oversized thread diagnosis, session health, agent observability, bounded metadata cleanup, safe handoff recovery, and explicit creation of user-visible sidebar recovery tasks.
 
 Primary skill: skills/codex-watchdog/SKILL.md
 Watchdog CLI: skills/codex-watchdog/scripts/codex_watchdog.py
@@ -21,6 +21,8 @@ Safety invariants:
 - caller-selected rolling no-progress thresholds by task class, rather than one universal 180-second cap;
 - threshold expiry triggers main-agent or monitoring-agent review; healthy current evidence can heartbeat and continue;
 - recovery manifests contain metadata only;
+- an explicit request for a new visible task uses `list_projects` and `create_thread`, never a subagent or Quick Chat substitute;
+- successful visible task creation must return a `::created-thread` receipt;
 - outputs and retention are bounded.
 
-Use this project when a user asks for a Codex watchdog, stuck tool-call monitoring, tool timeout detection, long-running agent supervision, oversized Codex task diagnosis, context-pressure handoff, watchdog enable/disable controls, or safe recovery after a reconnect.
+Use this project when a user asks for a Codex watchdog, stuck tool-call monitoring, tool timeout detection, long-running agent supervision, oversized Codex task diagnosis, context-pressure handoff, watchdog enable/disable controls, safe recovery after a reconnect, a new Codex side chat, or a sidebar-visible recovery task.

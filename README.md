@@ -184,6 +184,8 @@ python $Watchdog recover-plan --thread '<thread-id>' --turn '<turn-id>'
 
 The plan requires the supervising Agent to inspect the live Codex task, including incomplete model output. If the task is active or opaque, it stays untouched. If it is confirmed terminal or idle and unfinished, the preferred recovery is one continuation message to that same task. A small disk handoff and a clean user-visible task are fallbacks for an unrecoverable or critically oversized history. The watchdog itself never sends the continuation or creates a new task.
 
+When the user explicitly asks for a new sidebar-visible task, the skill now requires the supervising Agent to use Codex's `list_projects` and `create_thread` tools immediately, pass only the small handoff and exact next action, and return a `::created-thread{threadId="..."}` receipt. A subagent, background worker, Quick Chat, or a promise to create a task does not satisfy the request. If the tool is unavailable, the Agent must report failure honestly and offer `codex://threads/new?prompt=...&path=...` or `Ctrl+N`; the deep link only pre-fills the composer.
+
 The external daemon cannot force the main Codex task to wake through an app-server, scheduler, client, or network disconnect. It can preserve evidence and alert the user so recovery is informed rather than blind.
 
 ## Data, safety, and privacy
@@ -266,7 +268,7 @@ Before opening a pull request, also run the privacy checks documented in [CONTRI
 
 ## 中文简介
 
-这是一个面向 Codex Desktop 长任务的本地轻量看门狗：检测响应流或工具调用长时间没有进展，区分“模型仍在准备或编写代码”和真正需要复核的停滞，给并行任务分配不混淆的唯一标签，并为停止或上下文过大的任务生成“原任务优先”的安全恢复计划。只有缺少命令记录、文件未变化或模型流暂时安静时，它会明确标记为 `safe_to_interrupt: false`。它不会自动重试、自动发消息、自动新建任务、杀死 Codex，也不会清理 Codex 的会话或工程文件。
+这是一个面向 Codex Desktop 长任务的本地轻量看门狗：检测响应流或工具调用长时间没有进展，区分“模型仍在准备或编写代码”和真正需要复核的停滞，给并行任务分配不混淆的唯一标签，并为停止或上下文过大的任务生成“原任务优先”的安全恢复计划。只有缺少命令记录、文件未变化或模型流暂时安静时，它会明确标记为 `safe_to_interrupt: false`。当用户明确要求“新开侧边栏任务”时，技能会要求 Agent 调用 `create_thread` 并返回可验证的任务 ID，不能拿子代理或口头承诺代替。看门狗本身不会自动重试、自动发消息、擅自新建任务、杀死 Codex，也不会清理 Codex 的会话或工程文件。
 
 ## License
 

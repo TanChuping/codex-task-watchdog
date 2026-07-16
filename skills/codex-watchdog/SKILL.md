@@ -1,6 +1,6 @@
 ---
 name: codex-watchdog
-description: Monitor long-running Codex tools and diagnose stalled or oversized tasks. Use for watchdog, 看门狗, stuck tool calls, tool timeouts, 卡死监控, session health, adaptive no-progress thresholds, bounded cleanup, safe handoff recovery, enabling or disabling local monitoring, or work expected to run longer than 30 seconds. Never auto-retry side effects or delete Codex data.
+description: Monitor long-running Codex tools and diagnose stalled or oversized tasks. Use for watchdog, 看门狗, stuck tool calls, tool timeouts, 卡死监控, session health, adaptive no-progress thresholds, bounded cleanup, safe handoff recovery, explicit visible sidebar task creation during recovery, enabling or disabling local monitoring, or work expected to run longer than 30 seconds. Never auto-retry side effects or delete Codex data.
 ---
 
 # Codex Watchdog
@@ -46,9 +46,39 @@ Then recover in this order:
 
 Treat `severity: review`, `evidence_class: absence_only`, or `safe_to_interrupt: false` literally. These are review notices, not stall verdicts. The watchdog must remain lower-cost than the work it monitors; avoid repeated broad log scans or diagnostic prompts that preempt normal work.
 
+## Create a visible sidebar task when explicitly requested
+
+Treat “新开”, “新开对话”, “开 side chat”, “开一个左边栏可见的任务”, “换干净任务继续”, and equivalent wording as explicit authorization when the recovery context already identifies the work to hand off. Do not ask the user to repeat the authorization.
+
+A visible user-owned task is not a subagent or Quick Chat:
+
+- Use the Codex app `create_thread` tool for a task that must appear in the sidebar.
+- Never substitute `spawn_agent`, a background worker, a subagent thread, or a commentary promise.
+- Load only the exact `list_projects` and `create_thread` tools if they are deferred; do not enumerate a broad tool catalog.
+
+Execute the handoff immediately:
+
+1. Write or verify a small disk handoff first when continuity matters. Include the repository/worktree, branch or commit, dirty files, completed outputs, verification, one next action, safe retries, and forbidden repeats.
+2. Run `list_projects` and select the project matching the exact workspace. For repo-scoped work, call `create_thread` with:
+
+```json
+{
+  "prompt": "Read <HANDOFF_PATH>, use the specified repository/worktree, and perform only the recorded next action. Preserve completed work and forbidden repeats.",
+  "target": {
+    "type": "project",
+    "projectId": "<PROJECT_ID>",
+    "environment": { "type": "local" }
+  }
+}
+```
+
+Use a worktree environment only when isolation is requested. Set `startingState` to `working-tree` only when the user explicitly wants current uncommitted changes, or to `branch` only for an existing branch/ref. Omit `model` and `thinking` unless the user explicitly requests them. Use `projectless` only for genuinely non-project work.
+3. After success, report the returned task ID and emit `::created-thread{threadId="..."}`; if creation is queued, emit the returned `clientThreadId` form. This receipt is required proof that a sidebar task was actually created.
+4. If `create_thread` is unavailable or fails, say that creation did not occur. Do not claim success. Offer the documented fallback `codex://threads/new?prompt=...&path=...` or `Ctrl+N`; note that a deep link pre-fills the composer but does not send automatically.
+
 ## Recover oversized tasks
 
-Run `python <SKILL_DIR>/scripts/check_thread_health.py` before substantial work after “continue” or a batch request. Resolve `<SKILL_DIR>` from this skill's own location; never hard-code a user profile path. Use `--thread ID` when diagnosing another task. On `critical`, do not continue or fork that task. Preserve repository and output files, write a small project handoff plus manifest, and start clean with only those paths after the user requests a new task.
+Run `python <SKILL_DIR>/scripts/check_thread_health.py` before substantial work after “continue” or a batch request. Resolve `<SKILL_DIR>` from this skill's own location; never hard-code a user profile path. Use `--thread ID` when diagnosing another task. On `critical`, do not continue or fork that task. Preserve repository and output files and write a small project handoff plus manifest. When the user explicitly requests a new visible task, follow the sidebar-task procedure above immediately instead of merely describing it.
 
 Automatic review incidents write metadata-only recovery manifests under `$CODEX_HOME/watchdog/recovery_manifests` (or `~/.codex/watchdog/recovery_manifests` when `CODEX_HOME` is unset). They may identify a rollout path and byte size but never read, rewrite, compact, or delete rollout contents. A manifest is diagnostic evidence, not authorization to interrupt or retry.
 

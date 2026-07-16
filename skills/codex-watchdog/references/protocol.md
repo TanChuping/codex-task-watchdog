@@ -69,6 +69,17 @@ After reconnecting, run `status`, `list --limit 50`, and `incidents --limit 20`,
 
 For task recovery, run `recover-plan`, inspect the live task with the Codex thread/task interface, and prefer one continuation message to the same task only after it is confirmed terminal or idle and unfinished. If it is active or opaque, leave it untouched. Do not have the monitoring task redo the target task. Use a small disk handoff and a clean task only when same-task recovery is impossible or health is `critical`.
 
+### Visible sidebar task handoff
+
+When the user explicitly requests a new visible task after a recovery decision, execute the request in the same turn:
+
+1. Verify the small disk handoff.
+2. Load only `list_projects` and `create_thread`.
+3. Resolve the matching project and call `create_thread` with a minimal prompt containing the handoff path and one next action. Use a local project environment by default; choose a worktree only when isolation is requested. Do not override model or reasoning settings unless requested.
+4. Return the created task ID and emit the `::created-thread{threadId="..."}` receipt (or the queued `clientThreadId` form).
+
+`spawn_agent`, a background worker, Quick Chat, a subagent thread, and saying “I will create it” are not substitutes. If the tool is unavailable or fails, report that no task was created and provide `codex://threads/new?prompt=...&path=...` or `Ctrl+N` as a user-driven fallback. Deep links pre-fill the composer and do not submit the prompt.
+
 Use bounded `list` and `incidents` output in model context; compatibility `--all` exists only for older callers and remains capped. A model-preparation event, new `/responses` request, stream event, terminal event, or matching completion clears stale transition tracking. A call with no completion produces `tool_running_no_completion` after 180 seconds and a `review` incident after 600 seconds; review incidents reuse one metadata-only recovery manifest for the same incident state. Quiet opaque model preparation waits 600 seconds and quiet model streams wait 900 seconds before review by default.
 
 Parallel calls keep separate `call_id` incident records, but notifications are grouped by task/turn/type/severity and simultaneous critical calls in one turn share one recovery manifest.
