@@ -6,7 +6,7 @@ Local-first stall detection and safe recovery for long-running OpenAI Codex task
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://www.python.org/)
 
-**Codex Task Watchdog** is an unofficial, Windows-first **OpenAI Codex watchdog** and installable **Codex skill**. It detects stalled tool calls, missing SSE response activity, and long-running tasks; distinguishes opaque model preparation from completed-command inactivity; diagnoses oversized Codex threads under context pressure; and builds same-task-first recovery plans. It is deliberately conservative: it records evidence and notifies you, but never automatically retries a quota-spending or side-effecting tool, sends a prompt, creates a task, kills Codex, or deletes task data.
+**Codex Task Watchdog** is an unofficial, Windows-first **OpenAI Codex watchdog** and installable **Codex skill**. It detects stalled tool calls, missing SSE response activity, long-running tasks, and backend-completed turns whose UI may still display Thinking; distinguishes opaque model preparation from completed-command inactivity; diagnoses oversized Codex threads under context pressure; and builds same-task-first recovery plans. It is deliberately conservative: it records evidence and notifies you, but never automatically retries a quota-spending or side-effecting tool, sends a prompt, creates a task, kills Codex, or deletes task data.
 
 The project is useful when Codex Desktop remains on “Thinking”, a tool call never returns to the agent, a batch silently stops progressing, or an old task has accumulated too much history to continue safely.
 
@@ -20,6 +20,7 @@ The project is useful when Codex Desktop remains on “Thinking”, a tool call 
 | Detects response-stream and tool-completion stalls | Treat every slow model response as a failure |
 | Tracks explicit long operations with unique `arm` / `heartbeat` / `disarm` tags | Guess which parallel call completed |
 | Classifies absence-only evidence as review due and explicitly unsafe to interrupt | Treat missing completed commands or unchanged files as proof that an Agent stopped working |
+| Emits a one-time backend-completed receipt after a reviewed stall | Claim it can inspect or clear the Codex renderer's busy flag |
 | Produces local Windows notifications and bounded incident records | Send telemetry or upload logs |
 | Builds bounded, same-task-first recovery plans and metadata-only manifests | Automatically send wake prompts, create tasks, fork, or compact giant histories |
 | Prunes only watchdog-owned metadata under strict retention rules | Automatically retry tools, spend quota, or repeat side effects |
@@ -33,6 +34,7 @@ Several different failures look identical in the UI:
 - a tool completed but the next model request never began;
 - the Agent is composing code or preparing the next model request, so no completed command or file change is visible yet;
 - the client or app-server disconnected, so a timer cannot wake the active agent;
+- the backend completed, but the client missed the terminal UI update and remains on Thinking;
 - the task is technically alive but its accumulated context is now operationally risky.
 
 Open Codex reports describe related symptoms, including [long periods without child-agent health/progress signals](https://github.com/openai/codex/issues/16900) and [Codex Desktop remaining on Thinking while Stop fails](https://github.com/openai/codex/issues/24287). The watchdog supplies external evidence and a safe recovery boundary; it does not claim to repair the Codex scheduler or network connection itself.
@@ -65,7 +67,7 @@ The default detector thresholds are:
 | Tool started, but no matching completion | 180 seconds | 600 seconds |
 | Explicitly armed operation with no verified progress | — | selected rolling no-progress threshold |
 
-A model-preparation event, new response request, stream event, terminal event, or matching completion clears stale transition state. Parallel calls remain isolated by `call_id` and explicit jobs use unique tagged generations. Absence-only incidents carry `confirmed_failure: false` and `safe_to_interrupt: false`; they notify and record, but do not prove failure or authorize interruption.
+A model-preparation event, new response request, stream event, terminal event, or matching completion clears stale transition state. If a previously reviewed stall later reaches a positive backend completion event, the watchdog emits one `backend_completed_after_stall_review` receipt. Its recovery action is to refresh the client if Thinking remains—not to wait, wake, stop, or retry completed work. Parallel calls remain isolated by `call_id` and explicit jobs use unique tagged generations. Absence-only incidents carry `confirmed_failure: false` and `safe_to_interrupt: false`; they notify and record, but do not prove failure or authorize interruption.
 
 For explicitly armed work, 180 seconds is no longer a universal limit. The main conversation selects a **rolling no-progress threshold** based on the expected silent interval:
 
@@ -182,7 +184,7 @@ Build a bounded recovery decision for one task without waking or stopping it:
 python $Watchdog recover-plan --thread '<thread-id>' --turn '<turn-id>'
 ```
 
-The plan requires the supervising Agent to inspect the live Codex task, including incomplete model output. If the task is active or opaque, it stays untouched. If it is confirmed terminal or idle and unfinished, the preferred recovery is one continuation message to that same task. A small disk handoff and a clean user-visible task are fallbacks for an unrecoverable or critically oversized history. The watchdog itself never sends the continuation or creates a new task.
+The plan requires the supervising Agent to inspect the live Codex task, including incomplete model output. If the task is active or opaque, it stays untouched. If the backend is terminal-completed while the UI still shows Thinking, the plan returns `backend_completed_refresh_client_if_busy`: do not wait or retry; switch tasks and back, then reload Codex if necessary. Recent terminal evidence can be reconstructed from a bounded 1,000-row read-only log query after watchdog cache pruning or restart. If it is confirmed terminal or idle and unfinished, the preferred recovery is one continuation message to that same task. A small disk handoff and a clean user-visible task are fallbacks for an unrecoverable or critically oversized history. The watchdog itself never sends the continuation or creates a new task.
 
 When the user explicitly asks for a new sidebar-visible task, the skill now requires the supervising Agent to use Codex's `list_projects` and `create_thread` tools immediately, pass only the small handoff and exact next action, and return a `::created-thread{threadId="..."}` receipt. A subagent, background worker, Quick Chat, or a promise to create a task does not satisfy the request. If the tool is unavailable, the Agent must report failure honestly and offer `codex://threads/new?prompt=...&path=...` or `Ctrl+N`; the deep link only pre-fills the composer.
 
@@ -254,6 +256,7 @@ This repository focuses on a small Windows-first, local event-state detector plu
 - A quiet model may be actively reasoning or composing a patch rather than stuck; thresholds are review points, not proof or permission to interrupt.
 - It does not repair proxy, VPN, TUN, DNS, provider, or OpenAI service problems.
 - It does not promise exactly-once tool execution after a disconnect.
+- It cannot inspect or mutate the Codex renderer's busy flag; it can only prove backend completion and tell you when a client refresh is the safe recovery.
 - Automatic retries, automatic UI prompts, process killing, and destructive session cleanup are out of scope.
 
 ## Development

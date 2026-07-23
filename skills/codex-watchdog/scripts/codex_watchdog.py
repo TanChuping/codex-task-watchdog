@@ -31,9 +31,11 @@ SCHEMA_VERSION = 1
 DETECTOR_VERSION = 2
 DEFAULT_TASK_NAME = "Codex Watchdog"
 MAX_LOG_BATCH_ROWS = 2000
+MAX_RECOVERY_LOG_ROWS = 1000
 DEFAULT_LIST_LIMIT = 100
 DEFAULT_INCIDENT_LIMIT = 20
 MAX_OUTPUT_RECORDS = 500
+TERMINAL_RETENTION_SECONDS = 6 * 60 * 60
 DISARMED_RETENTION_SECONDS = 30 * 24 * 60 * 60
 MAX_DISARMED_JOBS = 500
 INCIDENT_MAX_BYTES = 5 * 1024 * 1024
@@ -360,6 +362,11 @@ def fresh_turn(process_uuid: str | None, thread_id: str, turn_id: str, stamp: fl
         "first_stream_at": None,
         "last_stream_at": None,
         "terminal": None,
+        "terminal_at": None,
+        "terminal_notice_pending": False,
+        "terminal_notice_emitted": False,
+        "stall_incident_seen_at": None,
+        "last_stall_incident_kind": None,
         "last_event_at": stamp,
         "incident": None,
         "recovery_manifest": None,
@@ -482,6 +489,9 @@ def process_event(state: dict, row: tuple) -> None:
     if target == TARGET_COMPLETE:
         turn["phase"] = "terminal"
         turn["terminal"] = "completed"
+        turn["terminal_at"] = stamp
+        turn["terminal_notice_pending"] = bool(turn.get("stall_incident_seen_at"))
+        turn["terminal_notice_emitted"] = False
         clear_active_calls(turn)
         turn["post_tool_at"] = None
         turn["model_preparing_at"] = None
@@ -492,6 +502,7 @@ def process_event(state: dict, row: tuple) -> None:
     if target == TARGET_ABORT:
         turn["phase"] = "terminal"
         turn["terminal"] = "aborted"
+        turn["terminal_at"] = stamp
         clear_active_calls(turn)
         turn["post_tool_at"] = None
         turn["model_preparing_at"] = None
@@ -667,6 +678,30 @@ def check_turn_incidents(runtime: Runtime, state: dict, config: dict, now: float
 
     for turn in state.get("turns", {}).values():
         if turn.get("terminal"):
+            if (
+                turn.get("terminal") == "completed"
+                and turn.get("terminal_notice_pending")
+                and not turn.get("terminal_notice_emitted")
+            ):
+                terminal_at = float(turn.get("terminal_at", now) or now)
+                incident = make_incident(
+                    "backend_completed_after_stall_review",
+                    "resolved",
+                    max(0.0, now - terminal_at),
+                    thread_id=turn["thread_id"],
+                    turn_id=turn["turn_id"],
+                    evidence_class="positive_terminal",
+                    observability="backend_terminal_event",
+                    confirmed_failure=False,
+                    safe_to_interrupt=False,
+                    recommended_action="refresh_client_if_ui_still_busy_do_not_retry",
+                )
+                incident["backend_completed"] = True
+                incident["ui_state"] = "unobservable"
+                incident["previous_incident_kind"] = turn.get("last_stall_incident_kind")
+                runtime.append_incident(incident)
+                turn["terminal_notice_emitted"] = True
+                created.append(incident)
             continue
         if turn.get("phase") in ("request_pending", "streaming") and turn.get("active_calls"):
             clear_active_calls(turn)
@@ -712,6 +747,8 @@ def check_turn_incidents(runtime: Runtime, state: dict, config: dict, now: float
                 turn_recovery_manifest = recovery_manifest
                 incident["recovery_manifest"] = recovery_manifest
             runtime.append_incident(incident)
+            turn["stall_incident_seen_at"] = now
+            turn["last_stall_incident_kind"] = incident["kind"]
             tool_previous[call_id] = {
                 "severity": severity,
                 "sequence": sequence,
@@ -772,6 +809,8 @@ def check_turn_incidents(runtime: Runtime, state: dict, config: dict, now: float
             turn["recovery_manifest"] = recovery_manifest
             incident["recovery_manifest"] = recovery_manifest
         runtime.append_incident(incident)
+        turn["stall_incident_seen_at"] = now
+        turn["last_stall_incident_kind"] = incident["kind"]
         turn["incident"] = {
             "kind": kind,
             "severity": severity,
@@ -890,7 +929,7 @@ def prune_turns(state: dict, now: float) -> None:
         if turn.get("active_calls"):
             continue
         age = now - float(turn.get("last_event_at", now))
-        if turn.get("terminal") and age > 3600:
+        if turn.get("terminal") and age > TERMINAL_RETENTION_SECONDS:
             removable.append(key)
         elif age > 86400:
             removable.append(key)
@@ -1021,6 +1060,12 @@ def notify_incidents(config: dict, incidents: list[dict]) -> None:
         age = max(float(record.get("age_seconds", 0)) for record in records)
         count = len(records)
         subject = f"{count} calls" if count > 1 else "1 event"
+        if kind == "backend_completed_after_stall_review":
+            notify_windows(
+                "Codex backend completed",
+                f"Thread {thread}, turn {turn} completed after a stall review. If Codex still shows Thinking, switch away and back or reload the app. Do not wait or retry the completed work.",
+            )
+            continue
         notify_windows(
             "Codex watchdog review",
             f"{severity} {kind}: {subject}, thread {thread}, turn {turn}, gap {age:.1f}s. Agent may still be working; do not interrupt from this alert alone.",
@@ -1219,6 +1264,38 @@ def infer_turn(runtime: Runtime, thread_id: str) -> str | None:
     return None
 
 
+def recover_turn_from_logs(
+    runtime: Runtime, thread_id: str, turn_id: str | None
+) -> dict | None:
+    """Reconstruct one recent turn from bounded read-only logs after cache pruning/restart."""
+    config = runtime.config()
+    database = Path(config["db_path"]).expanduser()
+    if not database.exists() or not thread_id or thread_id.startswith("unknown"):
+        return None
+    try:
+        with contextlib.closing(open_logs(database)) as connection:
+            rows = list(
+                connection.execute(
+                    "SELECT id,ts,ts_nanos,target,feedback_log_body,thread_id,process_uuid "
+                    "FROM logs WHERE thread_id=? AND target IN (?,?,?,?,?,?) "
+                    "ORDER BY id DESC LIMIT ?",
+                    (thread_id, *TARGETS, MAX_RECOVERY_LOG_ROWS),
+                )
+            )
+    except (OSError, sqlite3.Error):
+        return None
+    reconstructed = {"turns": {}}
+    for row in reversed(rows):
+        process_event(reconstructed, row)
+    candidates = [
+        turn
+        for turn in reconstructed.get("turns", {}).values()
+        if str(turn.get("thread_id")) == thread_id
+        and (turn_id is None or str(turn.get("turn_id")) == turn_id)
+    ]
+    return max(candidates, key=lambda item: float(item.get("last_event_at", 0)), default=None)
+
+
 def create_tag(thread_id: str, turn_id: str, kind: str, generation: int) -> str:
     quote = lambda value: urllib.parse.quote(str(value), safe="")
     return (
@@ -1335,6 +1412,17 @@ def build_recovery_plan(runtime: Runtime, thread_id: str, turn_id: str | None) -
         and (turn_id is None or str(turn.get("turn_id")) == turn_id)
     ]
     turn = max(candidates, key=lambda item: float(item.get("last_event_at", 0)), default=None)
+    state_source = "watchdog_cache" if turn else "unobserved"
+    if turn is None or not turn.get("terminal"):
+        recovered = recover_turn_from_logs(runtime, thread_id, turn_id)
+        if recovered and (
+            turn is None
+            or recovered.get("terminal")
+            or float(recovered.get("last_event_at", 0))
+            > float(turn.get("last_event_at", 0))
+        ):
+            turn = recovered
+            state_source = "logs_2.sqlite_read_only"
     selected_turn_id = turn_id or (str(turn.get("turn_id")) if turn else None)
     incidents = [
         record
@@ -1355,8 +1443,8 @@ def build_recovery_plan(runtime: Runtime, thread_id: str, turn_id: str | None) -
     terminal = turn.get("terminal") if turn else None
     active_calls = list(turn.get("active_calls", [])) if turn else []
     if terminal == "completed":
-        decision = "completed_no_recovery"
-        live_state = "terminal_completed"
+        decision = "backend_completed_refresh_client_if_busy"
+        live_state = "terminal_completed_backend"
     elif terminal == "aborted":
         decision = "same_thread_wake_candidate"
         live_state = "terminal_aborted"
@@ -1375,6 +1463,7 @@ def build_recovery_plan(runtime: Runtime, thread_id: str, turn_id: str | None) -
     return {
         "thread_id": thread_id,
         "turn_id": selected_turn_id,
+        "state_source": state_source,
         "phase": phase,
         "terminal": terminal,
         "active_calls": active_calls,
@@ -1384,9 +1473,14 @@ def build_recovery_plan(runtime: Runtime, thread_id: str, turn_id: str | None) -
         "live_state": live_state,
         "safe_to_interrupt": False,
         "automatic_wake": False,
+        "backend_terminal_confirmed": terminal == "completed",
+        "ui_state": "unobservable",
+        "wait_needed": False if terminal == "completed" else None,
+        "retry_needed": False if terminal == "completed" else None,
         "same_thread_first": True,
         "wake_gate": "live task is terminal/idle, unfinished, and has no advancing output",
         "next_steps": [
+            "If the backend is terminal-completed but the UI still shows Thinking, do not wait, wake, stop, or retry the completed work; switch tasks and back, then reload Codex if needed.",
             "Inspect the target task's live state, including incomplete model output; completed command logs alone are insufficient.",
             "If it is still working or output is advancing, leave it untouched and heartbeat the exact watchdog tag.",
             "If it is confirmed stopped and unfinished, send one concise continuation to the same task; preserve its context and disk state.",

@@ -1,6 +1,6 @@
 ---
 name: codex-watchdog
-description: Monitor long-running Codex tools and diagnose stalled or oversized tasks. Use for watchdog, 看门狗, stuck tool calls, tool timeouts, 卡死监控, session health, adaptive no-progress thresholds, bounded cleanup, safe handoff recovery, explicit visible sidebar task creation during recovery, enabling or disabling local monitoring, or work expected to run longer than 30 seconds. Never auto-retry side effects or delete Codex data.
+description: Monitor long-running Codex tools and diagnose stalled, oversized, or UI-stale tasks. Use for watchdog, 看门狗, stuck Thinking indicators after backend completion, stuck tool calls, tool timeouts, 卡死监控, session health, adaptive no-progress thresholds, bounded cleanup, safe handoff recovery, explicit visible sidebar task creation during recovery, enabling or disabling local monitoring, or work expected to run longer than 30 seconds. Never auto-retry side effects or delete Codex data.
 ---
 
 # Codex Watchdog
@@ -43,6 +43,8 @@ Then recover in this order:
 3. If the task is confirmed terminal or idle, remains unfinished, and has no advancing output, send one concise continuation to that same task. Tell it to inspect its existing disk state and continue the exact unfinished step. Do not duplicate the work in the monitoring task and do not start a competing worker.
 4. After a reconnect, verify actual outputs before any retry. A missing UI notification is not proof that a side effect failed.
 5. Use a small disk handoff and ask for a clean task only when same-task recovery is impossible or thread health is `critical`. Never fork or clone a critical history.
+
+If `recover-plan` reports `backend_completed_refresh_client_if_busy`, the backend has positively completed even if Codex still displays Thinking. Do not wait, wake, stop, or retry that work. Switch to another task and back; reload Codex only if the stale indicator remains. The report reconstructs recent terminal evidence from at most 1,000 matching read-only log rows when the in-memory detector cache was restarted or pruned. The watchdog cannot observe or mutate the renderer's busy flag, so it records `ui_state: unobservable` and emits a one-time completion notification when a previously reviewed stall later reaches a backend terminal event.
 
 Treat `severity: review`, `evidence_class: absence_only`, or `safe_to_interrupt: false` literally. These are review notices, not stall verdicts. The watchdog must remain lower-cost than the work it monitors; avoid repeated broad log scans or diagnostic prompts that preempt normal work.
 

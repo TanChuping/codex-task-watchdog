@@ -69,6 +69,8 @@ After reconnecting, run `status`, `list --limit 50`, and `incidents --limit 20`,
 
 For task recovery, run `recover-plan`, inspect the live task with the Codex thread/task interface, and prefer one continuation message to the same task only after it is confirmed terminal or idle and unfinished. If it is active or opaque, leave it untouched. Do not have the monitoring task redo the target task. Use a small disk handoff and a clean task only when same-task recovery is impossible or health is `critical`.
 
+When a turn that already produced a stall warning/review later emits a positive backend completion event, record one `backend_completed_after_stall_review` incident with `severity: resolved`, `evidence_class: positive_terminal`, and `recommended_action: refresh_client_if_ui_still_busy_do_not_retry`. Notify once that the backend completed. If the UI still shows Thinking, switch away and back or reload the client; never resend, wake, stop, or replay completed work. Keep terminal detector state for six hours so delayed UI-stale reports remain diagnosable. If that cache was restarted or pruned, `recover-plan` reconstructs the requested turn from at most 1,000 matching rows in `logs_2.sqlite` opened read-only. The daemon cannot observe or clear the renderer's busy flag.
+
 ### Visible sidebar task handoff
 
 When the user explicitly requests a new visible task after a recovery decision, execute the request in the same turn:

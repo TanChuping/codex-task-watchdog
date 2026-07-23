@@ -234,6 +234,29 @@ class WatchdogTest(unittest.TestCase):
         self.assertEqual(turn["phase"], "terminal")
         self.assertEqual(turn["active_calls"], [])
 
+    def test_completion_after_stall_review_emits_ui_recovery_notice_once(self):
+        now = int(time.time())
+        self.insert(1, now - 40, wd.TARGET_REQUEST, request_body())
+        first = wd.run_once(self.runtime)
+        self.assertEqual(first["incidents"], 1)
+        self.assertEqual(self.incidents()[-1]["kind"], "request_no_first_event")
+
+        self.insert(2, now - 1, wd.TARGET_COMPLETE, complete_body())
+        second = wd.run_once(self.runtime)
+        third = wd.run_once(self.runtime)
+        self.assertEqual(second["incidents"], 1)
+        self.assertEqual(third["incidents"], 0)
+        notice = self.incidents()[-1]
+        self.assertEqual(notice["kind"], "backend_completed_after_stall_review")
+        self.assertEqual(notice["severity"], "resolved")
+        self.assertEqual(notice["evidence_class"], "positive_terminal")
+        self.assertTrue(notice["backend_completed"])
+        self.assertEqual(notice["ui_state"], "unobservable")
+        self.assertEqual(
+            notice["recommended_action"],
+            "refresh_client_if_ui_still_busy_do_not_retry",
+        )
+
     def test_parallel_calls_wait_until_all_are_done(self):
         with wd.FileLock(self.runtime.lock_path):
             config = self.runtime.config()
@@ -362,6 +385,32 @@ class WatchdogTest(unittest.TestCase):
             wd.notify_incidents({"notify": True}, incidents)
         notify.assert_called_once()
         self.assertIn("5 calls", notify.call_args.args[1])
+
+    def test_completion_notice_uses_non_retry_ui_recovery_message(self):
+        incident = wd.make_incident(
+            "backend_completed_after_stall_review",
+            "resolved",
+            1,
+            thread_id=THREAD,
+            turn_id=TURN,
+            evidence_class="positive_terminal",
+            observability="backend_terminal_event",
+            recommended_action="refresh_client_if_ui_still_busy_do_not_retry",
+        )
+        with mock.patch.object(wd, "notify_windows", return_value=True) as notify:
+            wd.notify_incidents({"notify": True}, [incident])
+        notify.assert_called_once()
+        self.assertEqual(notify.call_args.args[0], "Codex backend completed")
+        self.assertIn("Do not wait or retry", notify.call_args.args[1])
+
+    def test_terminal_state_is_retained_for_six_hour_ui_diagnosis_window(self):
+        now = time.time()
+        recent_terminal = wd.fresh_turn(PROCESS, THREAD, TURN, now - 2 * 60 * 60)
+        recent_terminal["terminal"] = "completed"
+        recent_terminal["phase"] = "terminal"
+        state = {"turns": {"recent": recent_terminal}}
+        wd.prune_turns(state, now)
+        self.assertIn("recent", state["turns"])
 
     def test_active_automatic_call_is_never_pruned_by_age_or_count(self):
         now = time.time()
@@ -506,6 +555,37 @@ class WatchdogTest(unittest.TestCase):
         self.assertEqual(plan["decision"], "same_thread_wake_candidate")
         self.assertFalse(plan["automatic_wake"])
         self.assertFalse(plan["safe_to_interrupt"])
+
+    def test_recover_plan_treats_completed_backend_as_ui_refresh_candidate(self):
+        now = time.time()
+        turn = wd.fresh_turn(PROCESS, THREAD, TURN, now)
+        turn["phase"] = "terminal"
+        turn["terminal"] = "completed"
+        turn["terminal_at"] = now
+        with wd.FileLock(self.runtime.lock_path):
+            state = self.runtime.state()
+            state["turns"] = {"completed": turn}
+            self.runtime.save_state(state)
+        plan = wd.build_recovery_plan(self.runtime, THREAD, TURN)
+        self.assertEqual(plan["decision"], "backend_completed_refresh_client_if_busy")
+        self.assertEqual(plan["live_state"], "terminal_completed_backend")
+        self.assertTrue(plan["backend_terminal_confirmed"])
+        self.assertEqual(plan["ui_state"], "unobservable")
+        self.assertFalse(plan["wait_needed"])
+        self.assertFalse(plan["retry_needed"])
+
+    def test_recover_plan_rebuilds_pruned_terminal_from_read_only_logs(self):
+        now = int(time.time())
+        self.insert(1, now - 1, wd.TARGET_COMPLETE, complete_body())
+        with wd.FileLock(self.runtime.lock_path):
+            state = self.runtime.state()
+            state["turns"] = {}
+            self.runtime.save_state(state)
+        plan = wd.build_recovery_plan(self.runtime, THREAD, TURN)
+        self.assertEqual(plan["state_source"], "logs_2.sqlite_read_only")
+        self.assertEqual(plan["terminal"], "completed")
+        self.assertEqual(plan["decision"], "backend_completed_refresh_client_if_busy")
+        self.assertTrue(plan["backend_terminal_confirmed"])
 
     def test_recover_plan_downgrades_legacy_critical_absence_record(self):
         self.runtime.append_incident(

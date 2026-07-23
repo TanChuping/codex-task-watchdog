@@ -1,4 +1,4 @@
 interface:
   display_name: "Codex Watchdog"
-  short_description: "Review stalls and create explicit visible recovery tasks"
-  default_prompt: "Use $codex-watchdog to diagnose without interrupting active work, then use same-task recovery or create a visible sidebar task when explicitly requested."
+  short_description: "Review stalls, stale Thinking UI, and safe recovery"
+  default_prompt: "Use $codex-watchdog to distinguish active work, backend completion with stale UI, and real recovery needs without retrying completed work."
